@@ -11,11 +11,13 @@ Ubuntu など、公式パッケージが提供されていないディストリ�
 ## 使い方
 
 ```sh
-cp compose.example.yaml compose.yaml
-# compose.yaml の image の OWNER を自分の GitHub ユーザー名に変更
+mkdir ripe-atlas && cd ripe-atlas
+curl -fsSLO https://raw.githubusercontent.com/fumons/ripe-atlas-probe-docker/main/docker-compose.yml
 docker compose up -d
 docker compose logs probe
 ```
+
+設定変更は `docker-compose.yml` を直接編集するか、`docker-compose.override.yml` を置いて上書きしてください。
 
 初回起動時にプローブ鍵が `./data/etc/probe_key` に生成され、ログに公開鍵と登録用URLが表示されます。
 
@@ -36,7 +38,7 @@ If this probe is not registered yet, register it at:
 
 ### 設定
 
-`compose.yaml` の `environment` で以下を設定すると `/etc/ripe-atlas/config.txt` に書き込まれます（未指定の項目は変更しません）。
+`docker-compose.yml` の `environment` で以下を設定すると `/etc/ripe-atlas/config.txt` に書き込まれます（未指定の項目は変更しません）。
 
 | 変数 | 説明 | 既定値 |
 | --- | --- | --- |
@@ -52,14 +54,14 @@ If this probe is not registered yet, register it at:
 ### 注意点
 
 - `security_opt: no-new-privileges` は付けないでください。計測用バイナリは setuid と `cap_net_raw` の file capability を使っています。
-- `--cap-drop ALL` する場合は `compose.example.yaml` にある capability（特に `NET_RAW`, `SETUID`, `SETGID`）を残してください。
+- `--cap-drop ALL` する場合は `docker-compose.yml` にある capability（特に `NET_RAW`, `SETUID`, `SETGID`）を残してください。
 - 既存のホストインストールから移行する場合は、ホストの `/etc/ripe-atlas/probe_key{,.pub}` を `./data/etc/` にコピーすれば同じプローブとして動きます（元のホスト側のサービスは止めてください）。
 
 ### デバッグ
 
 ```sh
 docker compose exec probe bash
-docker run --rm -it ghcr.io/OWNER/ripe-atlas-probe-docker:latest bash   # プローブを起動せずにシェル
+docker run --rm -it ghcr.io/fumons/ripe-atlas-probe-docker:latest bash   # プローブを起動せずにシェル
 ```
 
 ## イメージタグ

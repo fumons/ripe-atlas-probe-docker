@@ -1,13 +1,13 @@
-# Example docker compose file for the RIPE Atlas software probe.
+# RIPE Atlas software probe - docker compose file
 #
-#   cp compose.example.yaml compose.yaml
-#   # edit OWNER below
+#   mkdir ripe-atlas && cd ripe-atlas
+#   curl -fsSLO https://raw.githubusercontent.com/fumons/ripe-atlas-probe-docker/main/docker-compose.yml
 #   docker compose up -d
 #   docker compose logs probe      # shows the public key + registration URL
 #
 services:
   probe:
-    image: ghcr.io/OWNER/ripe-atlas-probe-docker:latest
+    image: ghcr.io/fumons/ripe-atlas-probe-docker:latest
     container_name: ripe-atlas-probe
     restart: unless-stopped
 

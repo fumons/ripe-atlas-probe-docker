@@ -1,5 +1,6 @@
 # Runtime data (contains the probe private key!)
 data/
-compose.yaml
-docker-compose.yml
+compose.override.yml
+compose.override.yaml
+docker-compose.override.yml
 .env
