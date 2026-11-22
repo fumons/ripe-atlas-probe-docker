@@ -1,0 +1,53 @@
+# Example docker compose file for the RIPE Atlas software probe.
+#
+#   cp compose.example.yaml compose.yaml
+#   # edit OWNER below
+#   docker compose up -d
+#   docker compose logs probe      # shows the public key + registration URL
+#
+services:
+  probe:
+    image: ghcr.io/OWNER/ripe-atlas-probe-docker:latest
+    container_name: ripe-atlas-probe
+    restart: unless-stopped
+
+    # Host networking is strongly recommended: the probe then sees the
+    # host's real IPv4/IPv6 addresses, which is what RIPE Atlas measures.
+    network_mode: host
+
+    # NOTE: do NOT set "no-new-privileges" - the measurement binary relies on
+    # setuid + the file capability cap_net_raw (ping / traceroute).
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN         # entrypoint fixes volume ownership
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID        # drop to ripe-atlas user / setuid measurement binary
+      - SETGID
+      - NET_RAW       # ICMP ping / traceroute
+      - KILL
+
+    environment:
+      TZ: UTC
+      # Optional probe settings, written to /etc/ripe-atlas/config.txt.
+      # Leave a variable out to keep whatever is in config.txt.
+      # RXTXRPT: "yes"          # report rx/tx byte counters
+      # TELNETD_PORT: "2023"    # local status telnet port (0 = disabled)
+      # HTTP_POST_PORT: "8080"
+      # PROBE_KEY_COMMENT: "my-probe"   # comment for a newly generated key
+
+    volumes:
+      # Contains the probe key - back this up! Losing it = new probe.
+      - ./data/etc:/etc/ripe-atlas
+      - ./data/spool:/var/spool/ripe-atlas
+
+    # Optional resource limits (the probe is very light)
+    mem_limit: 256m
+    cpus: 0.5
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

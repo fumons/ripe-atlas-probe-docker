@@ -1,0 +1,262 @@
+name: Build & publish image
+
+on:
+  # Weekly upstream release check (Monday 03:00 UTC = 12:00 JST)
+  schedule:
+    - cron: "0 3 * * 1"
+  # Rebuild the current version when the image definition changes
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - docker/**
+      - .github/workflows/build.yml
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Upstream version/tag to build (empty = latest release)"
+        required: false
+        default: ""
+      force:
+        description: "Rebuild even if the image tag already exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: RIPE-NCC/ripe-atlas-software-probe
+
+jobs:
+  check:
+    name: Check upstream version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      image: ${{ steps.check.outputs.image }}
+      build: ${{ steps.check.outputs.build }}
+      new_version: ${{ steps.check.outputs.new_version }}
+      release_url: ${{ steps.check.outputs.release_url }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine version and whether to build
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_FORCE: ${{ inputs.force }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            version="${INPUT_VERSION}"
+          else
+            # releases/latest never returns pre-releases
+            version="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
+          fi
+          if [ -z "${version}" ]; then
+            echo "::error::Could not determine upstream version"; exit 1
+          fi
+
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+
+          if docker manifest inspect "${image}:${version}" >/dev/null 2>&1; then
+            exists=true
+          else
+            exists=false
+          fi
+
+          build=false
+          new_version=false
+          if [ "${exists}" = false ]; then
+            build=true
+            new_version=true
+          elif [ "${EVENT}" = push ] || [ "${INPUT_FORCE:-false}" = true ]; then
+            build=true
+          fi
+
+          echo "Upstream version : ${version}"
+          echo "Image            : ${image}"
+          echo "Tag exists       : ${exists}"
+          echo "Build            : ${build}"
+
+          {
+            echo "version=${version}"
+            echo "image=${image}"
+            echo "build=${build}"
+            echo "new_version=${new_version}"
+            echo "release_url=https://github.com/${UPSTREAM_REPO}/releases/tag/${version}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### RIPE Atlas software probe"
+            echo "- Upstream version: \`${version}\`"
+            echo "- Image tag already exists: \`${exists}\`"
+            echo "- Build: \`${build}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Prepare
+        run: |
+          platform='${{ matrix.platform }}'
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            ATLAS_VERSION=${{ needs.check.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.check.outputs.version }}
+          outputs: type=image,name=${{ needs.check.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
+
+      - name: Export digest
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          digest='${{ steps.build.outputs.digest }}'
+          touch "${RUNNER_TEMP}/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Publish multi-arch manifest
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ needs.check.outputs.image }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t "${IMAGE}:${VERSION}" \
+            -t "${IMAGE}:latest" \
+            $(printf "${IMAGE}@sha256:%s " *)
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+
+  notify:
+    name: Discord notification
+    needs: [check, build, merge]
+    if: always() && needs.check.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Send Discord webhook
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RESULT: ${{ needs.merge.result }}
+          NEW_VERSION: ${{ needs.check.outputs.new_version }}
+          VERSION: ${{ needs.check.outputs.version }}
+          IMAGE: ${{ needs.check.outputs.image }}
+          RELEASE_URL: ${{ needs.check.outputs.release_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISCORD_WEBHOOK_URL:-}" ]; then
+            echo "DISCORD_WEBHOOK_URL is not set - skipping notification"
+            exit 0
+          fi
+
+          if [ "${RESULT}" = success ]; then
+            # Successful rebuilds of an existing version are not announced.
+            if [ "${NEW_VERSION}" != true ]; then
+              echo "Rebuild of existing version - no notification"
+              exit 0
+            fi
+            title="🛰️ RIPE Atlas Software Probe ${VERSION} released"
+            desc="New image published: \`${IMAGE}:${VERSION}\` (also \`latest\`)"
+            color=3066993   # green
+          else
+            title="❌ Image build failed (${VERSION})"
+            desc="Building \`${IMAGE}:${VERSION}\` failed (result: ${RESULT})."
+            color=15158332  # red
+          fi
+
+          payload="$(jq -n \
+            --arg title "${title}" \
+            --arg desc "${desc}" \
+            --argjson color "${color}" \
+            --arg release "${RELEASE_URL}" \
+            --arg run "${RUN_URL}" \
+            --arg pull "docker pull ${IMAGE}:${VERSION}" \
+            '{
+              username: "RIPE Atlas Probe Image",
+              embeds: [{
+                title: $title,
+                description: $desc,
+                color: $color,
+                fields: [
+                  {name: "Upstream release", value: $release},
+                  {name: "Pull", value: ("```" + $pull + "```")},
+                  {name: "Workflow run", value: $run}
+                ]
+              }]
+            }')"
+
+          curl -fsS -X POST -H "Content-Type: application/json" \
+            --data "${payload}" "${DISCORD_WEBHOOK_URL}"
